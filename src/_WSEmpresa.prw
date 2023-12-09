@@ -88,6 +88,7 @@ WSMETHOD NEW WSCLIENT WSEmpresa
 	::Init()
 	::UrlBase := Lower(AllTrim(GetMv("MV_XPARURL")))
 	::Wsdl := TWsdlManager():New()
+	::Wsdl:AddHttpHeader("Authorization", "Bearer " + U_NewToken())
 
 	::Wsdl:lAlwaysSendSA    := .F. //se for SOAP 1.1, é necessário forçar o envio do Header
 	::Wsdl:bNoCheckPeerCert := .T. //elimina falha de certificado (anonymous peer cert)

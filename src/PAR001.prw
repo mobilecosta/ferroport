@@ -334,6 +334,9 @@ Static Function fEmpresa(oProcess, nProc)
 	Local cReplace := "_"
 	Local cErros   := ""
 	Local cAvisos  := ""
+	Local cRet     := ""
+	Local cUrl     := ""
+	Local cMetodo  := ""
 
 	// Cria o objeto da classe TWsdlManager
 	oWsdl := TWsdlManager():New()
@@ -349,14 +352,16 @@ Static Function fEmpresa(oProcess, nProc)
 	*/
 	oWsdl:nSSLVersion := 0
 
-	xRet := oWsdl:ParseURL(Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" )
+	cUrl := Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" 
+	xRet := oWsdl:ParseURL(cUrl)
 
 	If xRet == .F.
 		ConOut("Erro ParseURL: " + oWsdl:cError)
 		Return
 	EndIf
 
-	lRet := oWsdl:SetOperation("ProcessarEmpresa")
+	cMetodo := "ProcessarEmpresa"
+	lRet := oWsdl:SetOperation(cMetodo)
 	If lRet == .F.
 		ConOut("Erro SetOperation: " + oWsdl:cError)
 		return
@@ -378,14 +383,17 @@ Static Function fEmpresa(oProcess, nProc)
 				1=1
 			EndIf*/
 
-			lRet := oWsdl:SendSoapMsg(_cSoap)
+			//lRet := oWsdl:SendSoapMsg(_cSoap)
+			cRet := U_SendSOAP(cUrl, cMetodo, _cSoap, @cRet)
+			lRet := Empty(cRet)
 		End Sequence
 
 		If lRet == .F.
 			ConOut( "Erro SendSoapMsg: " + oWsdl:cError )
 			ConOut( "Erro SendSoapMsg FaultCode: " + oWsdl:cFaultCode )
 		Else
-			aRet := XmlParser(oWsdl:GetSoapResponse(), cReplace, @cErros, @cAvisos)
+			// oWsdl:GetSoapResponse()
+			aRet := XmlParser(cRet, cReplace, @cErros, @cAvisos)
 
 			// Objeto de Log \\
 			aAdd(aLogInt, {;
@@ -1409,6 +1417,22 @@ Static Function aProdutos(oProcess)
 				nCM1 := SB2->B2_CM1
 			EndIf
 
+			// checa e cadastra categoria do produto
+			// caso dÍ algum erro ao cadastrar a categoria, n„o cadastra o produto e pula para o prÛximo loga o erro
+			If ! u_checkCategoria((cAlias)->B1_TIPO, (cAlias)->B1_GRUPO, (cAlias)->B1_XSUBGRP, (cAlias)->B1_FILIAL, @aRetorno)
+				oLog:novoLog()
+					oLog:Retorno := 0
+					oLog:Origem := cCod
+					oLog:MsgLog := 'Erro ao cadastrar categoria do produto ' + AllTrim((cAlias)->B1_COD)
+					oLog:SoapFault := 'Erro ao cadastrar categoria do produto ' + AllTrim((cAlias)->B1_COD)
+					oLog:Tstamp := FwTimeStamp(3)
+					oLog:SalvaObj('SB1')
+					oLog:novoLog()
+
+				(cAlias)->(DbSkip())
+				LOOP
+			EndIf
+			
 			oProduto := Produto_ProdutoDTO():New()
 			//ALTERADO WALTER 29/03/2022
 			//oProduto:nnSituacaoProduto := IIf((cAlias)->B1_XINTPA == '4', 0, 1)
@@ -1465,6 +1489,170 @@ Static Function aProdutos(oProcess)
 	ErrorBlock(oError)
 Return aReg
 
+User Function checkCategoria(cTipo, cGrupo, cXSubGrp, cFilPrd, aRetorno)
+	Local oWSCategoria := WSParCategoria():New()
+	Local cDescTipo    := ""
+	Local cDescGrp     := ""
+	Local cDescSub     := ""
+
+	Default aRetorno   := {}
+
+	cDescTipo := AllTrim(Posicione("SX5", 1, xFilial("SX5") + "02" + cTipo + Space(TamSX3("X5_CHAVE")[1] - Len(cTipo)), "X5_DESCRI"))
+	cDescGrp  := AllTrim(Posicione("SBM", 1, xFilial("SBM") + cGrupo + Space(TamSX3("BM_GRUPO")[1] - Len(cGrupo)), "BM_DESC"))
+	cDescSub  := AllTrim(Posicione("SX5", 1, xFilial("SX5") + "ZH" + cXSubGrp + Space(TamSX3("X5_CHAVE")[1] - Len(cXSubGrp)), "X5_DESCRI"))
+
+	/* Checa se a categoria existe
+
+	-> MÈtodo RetornarCategoriaProduto
+		 WSSEND csCdCategoriaProdutpERP WSRECEIVE oWSRetornarCategoriaProdutoResult
+
+	csCdCategoriaProdutpERP				= String
+	oWSRetornarCategoriaProdutoResult	= Categoria_CategoriaDTO
+
+	--> Categoria_CategoriaDTO
+		WSDATA   oWSlstCategoriaIdioma     AS Categoria_ArrayOfCategoriaIdiomaDTO ** OPTIONAL **
+		WSDATA   csCdClasse                AS string OPTIONAL
+		WSDATA   csCdClasseEmpresa         AS string OPTIONAL
+		WSDATA   csCdClassePai             AS string OPTIONAL
+		WSDATA   csCdEmpresa               AS string OPTIONAL
+		WSDATA   csCdSituacao              AS string OPTIONAL
+		WSDATA   csDsClasse                AS string OPTIONAL
+	*/
+
+	// Checa para cada nÌvel de categoria se existe
+
+	/* Caso n„o exista, cadastra a categoria
+
+	-> MÈtodo ProcessarCategoriaProduto
+		 WSSEND oWSlstCategoria WSRECEIVE oWSProcessarCategoriaProdutoResult
+	
+	oWSlstCategoria						= Categoria_ArrayOfCategoriaDTO
+	oWSProcessarCategoriaProdutoResult	= Categoria_RetornoDTO
+	
+	--> Categoria_ArrayOfCategoriaDTO:
+		WSDATA   oWSParCategoriaDTO           AS Categoria_CategoriaDTO OPTIONAL
+
+	--> Categoria_RetornoDTO:
+		WSDATA   oWSlstWbtLogDTO	AS Categoria_ArrayOfWbtLogDTO OPTIONAL
+		WSDATA   nnIdRetorno		AS long OPTIONAL
+		WSDATA   csNrToken			AS string OPTIONAL
+	*/
+
+	// Checa se existe o tipo
+	oWSCategoria:csCdCategoriaProdutpERP := cTipo
+	oWSCategoria:RetornarCategoriaProduto()
+	if Empty(oWSCategoria:oWSRetornarCategoriaProdutoResult:csDSClasse)
+		// Cadastra os 3 nÌveis de categoria
+		oTipo := Categoria_CategoriaDTO():New()
+		oTipo:csCdClasse		:= cTipo
+		oTipo:csCdClasseEmpresa	:= cFilPrd
+		oTipo:csCdEmpresa		:= cFilPrd
+		oTipo:csCdSituacao		:= '1'
+		oTipo:csDsClasse		:= cDescTipo
+
+		aAdd(oWsCategoria:oWSlstCategoria:oWSParCategoriaDTO, oTipo:Clone())
+
+		oGrupo := Categoria_CategoriaDTO():New()
+		oGrupo:csCdClasse			:= cTipo + cGrupo
+		oGrupo:csCdClasseEmpresa	:= cFilPrd
+		oGrupo:csCdClassePai		:= cTipo
+		oGrupo:csCdEmpresa			:= cFilPrd
+		oGrupo:csCdSituacao			:= '1'
+		oGrupo:csDsClasse			:= cDescGrp
+
+		aAdd(oWsCategoria:oWSlstCategoria:oWSParCategoriaDTO, oGrupo:Clone())
+		
+		oSubGrupo := Categoria_CategoriaDTO():New()
+		oSubGrupo:csCdClasse		:= cTipo + cGrupo + cXSubGrp
+		oSubGrupo:csCdClasseEmpresa	:= cFilPrd
+		oSubGrupo:csCdClassePai		:= cTipo + cGrupo
+		oSubGrupo:csCdEmpresa		:= cFilPrd
+		oSubGrupo:csCdSituacao		:= '1'
+		oSubGrupo:csDsClasse		:= cDescSub
+
+		aAdd(oWsCategoria:oWSlstCategoria:oWSParCategoriaDTO, oSubGrupo:Clone())
+
+		aRetorno := oWsCategoria:ProcessarCategoriaProduto()
+
+		if ! aRetorno[1]
+			aRetorno := { .F., "Erro ao cadastrar categoria!", aRetorno}
+		Else
+			aRetorno := {.T., "Tipo, Grupo e SubGrupo cadastrados!", aRetorno}
+		EndIf
+	EndIf
+
+	If Len(aRetorno) > 0
+		Return aRetorno[1]
+	EndIf
+
+	// Checa se existe o grupo
+	oWSCategoria:csCdCategoriaProdutpERP := cTipo + cGrupo
+	oWSCategoria:RetornarCategoriaProduto()
+	if Empty(oWSCategoria:oWSRetornarCategoriaProdutoResult:csDSClasse)
+		// Cadastra os 2 nÌveis de categoria
+		oGrupo := Categoria_CategoriaDTO():New()
+		oGrupo:csCdClasse			:= cTipo + cGrupo
+		oGrupo:csCdClasseEmpresa	:= cFilPrd
+		oGrupo:csCdClassePai		:= cTipo
+		oGrupo:csCdEmpresa			:= cFilPrd
+		oGrupo:csCdSituacao			:= '1'
+		oGrupo:csDsClasse			:= cDescGrp
+
+		aAdd(oWsCategoria:oWSlstCategoria:oWSParCategoriaDTO, oGrupo:Clone())
+		
+		oSubGrupo := Categoria_CategoriaDTO():New()
+		oSubGrupo:csCdClasse		:= cTipo + cGrupo + cXSubGrp
+		oSubGrupo:csCdClasseEmpresa	:= cFilPrd
+		oSubGrupo:csCdClassePai		:= cTipo + cGrupo
+		oSubGrupo:csCdEmpresa		:= cFilPrd
+		oSubGrupo:csCdSituacao		:= '1'
+		oSubGrupo:csDsClasse		:= cDescSub
+
+		aAdd(oWsCategoria:oWSlstCategoria:oWSParCategoriaDTO, oSubGrupo:Clone())
+
+		aRetorno := oWsCategoria:ProcessarCategoriaProduto()
+
+		if ! aRetorno[1]
+			aRetorno := { .F., "Erro ao cadastrar categoria!", aRetorno}
+		Else
+			aRetorno := {.T., "Grupo e SubGrupo cadastrados!", aRetorno}
+		EndIf
+
+	EndIf
+
+	If Len(aRetorno) > 0
+		Return aRetorno[1]
+	EndIf
+
+	// Checa se existe o subgrupo
+	oWSCategoria:csCdCategoriaProdutpERP := cTipo + cGrupo + cXSubGrp
+	oWSCategoria:RetornarCategoriaProduto()
+	if Empty(oWSCategoria:oWSRetornarCategoriaProdutoResult:csDSClasse)
+		// Cadastra os 1 nÌveis de categoria
+		oSubGrupo := Categoria_CategoriaDTO():New()
+		oSubGrupo:csCdClasse		:= cTipo + cGrupo + cXSubGrp
+		oSubGrupo:csCdClasseEmpresa	:= cFilPrd
+		oSubGrupo:csCdClassePai		:= cTipo + cGrupo
+		oSubGrupo:csCdEmpresa		:= cFilPrd
+		oSubGrupo:csCdSituacao		:= '1'
+		oSubGrupo:csDsClasse		:= cDescSub
+
+		aAdd(oWsCategoria:oWSlstCategoria:oWSParCategoriaDTO, oSubGrupo:Clone())
+
+		oRetorno := oWsCategoria:ProcessarCategoriaProduto()
+
+		if ! aRetorno[1]
+			aRetorno := { .F., "Erro ao cadastrar categoria!", aRetorno}
+		Else
+			aRetorno :=  {.T., "SubGrupo cadastrado!", aRetorno}
+		EndIf
+	EndIf
+
+	If Len(aRetorno) = 0
+		aRetorno := {.T., "Categoria j· cadastrada!"}
+	EndIf
+
+Return aRetorno
 
 /*/{Protheus.doc} nSgUnidMed
 //Efetua a integraùùo da segunda unidade de medida (Unidade Conversùo)
@@ -1965,6 +2153,9 @@ Static Function nPrcFornec(oProcess)
 	Local aLogInt := {}
 	Local cReplace := "_"
 	Local nx := 0
+	Local cRet     := ""
+	Local cUrl     := ""
+	Local cMetodo  := ""
 	//Local oError 	:= ErrorBlock({|e| fErrorPar(e:ErrorStack, 'SA2', @oLog, @cCod)})
 
 	/* Adequaùùo de cadastros anteriores ù integraùùo com a Paradigma */
@@ -2095,14 +2286,16 @@ Static Function nPrcFornec(oProcess)
 			*/
 			oWsdl:nSSLVersion := 0
 
-			xRet := oWsdl:ParseURL(Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" )
+			cUrl := Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" 
+			xRet := oWsdl:ParseURL(cUrl)
 
 			If xRet == .F.
 				ConOut("Erro ParseURL: " + oWsdl:cError)
 				Return nProc
 			EndIf
 
-			lRet := oWsdl:SetOperation("ProcessarEmpresa")
+			cMetodo := "ProcessarEmpresa"
+			lRet := oWsdl:SetOperation(cMetodo)
 			If lRet == .F.
 				ConOut("Erro SetOperation: " + oWsdl:cError)
 				return nProc
@@ -2115,13 +2308,16 @@ Static Function nPrcFornec(oProcess)
 
 			_cSoap := ReTiGraf(_cSoap)
 
-			lRet := oWsdl:SendSoapMsg(_cSoap)
+			// lRet := oWsdl:SendSoapMsg(_cSoap)
+			cRet := U_SendSOAP(cUrl, cMetodo, _cSoap, @cRet)
+			lRet := Empty(cRet)
 
 			If lRet == .F.
 				//ConOut( "Erro SendSoapMsg: " + oWsdl:cError )
 				//ConOut( "Erro SendSoapMsg FaultCode: " + oWsdl:cFaultCode )
 				//fSoapFault(oLog)
-				aRet := XmlParser(oWsdl:GetSoapResponse(), cReplace, @cErros, @cAvisos)
+				// aRet := XmlParser(oWsdl:GetSoapResponse(), cReplace, @cErros, @cAvisos)
+				aRet := XmlParser(cRet, cReplace, @cErros, @cAvisos)
 
 				aAdd(aLogInt, {;
 					'ProcesssarFornecedor',;
@@ -2651,7 +2847,8 @@ Static Function nAlterComp(oProcess)
 	//varinfo( "", aOps )
 
 	// Define a operaùùo
-	xRet := oWsdl:SetOperation( "RetornarRequisicaoAlteracaoComprador" )
+	cMetodo := "RetornarRequisicaoAlteracaoComprador"
+	xRet := oWsdl:SetOperation( cMetodo )
 	if xRet == .F.
 		//Return "Nùo foi possivel executar a operacao RetornarRequisicaoAlteracaoComprador"
 	endif
@@ -2661,14 +2858,15 @@ Static Function nAlterComp(oProcess)
 	EndIf
 
 	// Envia a mensagem SOAP ao servidor
-	xRet := oWsdl:SendSoapMsg()
-	if !xRet
+	xRet := U_SendSOAP(cUrl, cMetodo, _cSoap, @cRet)
+	// xRet := oWsdl:SendSoapMsg()
+	if Empty(cxRet)
 		MsgStop( oWsdl:cError , "SendSoapMsg() ERROR")
 		//Return xRet := {oWsdl::cFaultCode, oWsdl:cError}
 	endif
 
 	// Pega a mensagem de resposta
-	xRet := oWsdl:GetSoapResponse()
+	// xRet := oWsdl:GetSoapResponse()
 	if(TYPE('cSOAPret') == 'C')
 		cSOAPret := xRet
 	EndIf
@@ -3750,14 +3948,17 @@ Static Function nProjeto(oProcess)
 	Local lWBCZ02 := ExistBlock("WBCZ02")
 	Local cIDret,cToken,cCodLog,cOrigem,cDesLog,cTipoDoc,cData := ''
 	Local oXML,OXML2
-
+	Local cRet     := ""
+	Local cUrl     := ""
+	Local cMetodo  := ""
 
 	oWsdl := TWsdlManager():New()
 	oWsdl:lSSLInsecure := .T.
 	oWsdl:nTimeout     := 120
 	oWsdl:nSSLVersion  := 0
 	oWsdl:AddHttpHeader("Authorization", "Bearer " + U_NewToken())
-	xRet := oWsdl:ParseURL(Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Projeto.svc?wsdl" )
+	cUrl := Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Projeto.svc?wsdl" 
+	xRet := oWsdl:ParseURL(cUrl)
 
 	If xRet == .F.
 		ConOut("WsActvs - Erro ParseURL: " + oWsdl:cError)
@@ -3765,13 +3966,12 @@ Static Function nProjeto(oProcess)
 	EndIf
 
 	// Definiùùo da operaùùo \\
-	lRet := oWsdl:SetOperation("ProcessarProjeto")
+	cMetodo := "ProcessarProjeto"
+	lRet := oWsdl:SetOperation(cMetodo)
 	If lRet == .F.
 		ConOut("WsActvs - Erro SetOperation: " + oWsdl:cError)
 		Return
 	EndIf
-
-
 
 	fIniLog("Integrando Projetos")
 
@@ -3816,9 +4016,12 @@ Static Function nProjeto(oProcess)
 
 		aAdd(aReg, (cAlias)->REG)
 
-		lRet := oWsdl:SendSoapMsg(cXml)
-		cXMLRet := oWsdl:GetSoapResponse()
-		oXML := XMLParser(cXMLRet, cReplace,  @cErros,  @cAvisos)
+		// lRet := oWsdl:SendSoapMsg(cXml)
+		// cXMLRet := oWsdl:GetSoapResponse()
+		cRet := U_SendSOAP(cUrl, cMetodo, cXml, @cRet)
+		lRet := Empty(cRet)
+
+		oXML := XMLParser(cRet, cReplace,  @cErros,  @cAvisos)
 
 		IF !lRet
 			RecLock("ZPL", .T.)
@@ -4833,6 +5036,10 @@ Static Function fAlterForne(oProcess)
 	Local cTpConta
 	Local lExitBanco as logical
 	Local nX := 0
+	Local cRet     := ""
+	Local cUrl     := ""
+	Local cMetodo  := ""
+
 	Private oRet
 
 	fIniLog("?")
@@ -4844,29 +5051,33 @@ Static Function fAlterForne(oProcess)
 	oWsdl:nSSLVersion := 0
 	oWsdl:AddHttpHeader("Authorization", "Bearer " + U_NewToken())
 
-	xRet := oWsdl:ParseURL(Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" )
+	cUrl := Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" 
+	xRet := oWsdl:ParseURL(cUrl)
 
 	If xRet == .F.
 		ConOut("Erro ParseURL: " + oWsdl:cError)
 		Return nProc
 	EndIf
 
-	lRet := oWsdl:SetOperation("RetornarEmpresaAtivadaInativada")
+	cMetodo := "RetornarEmpresaAtivadaInativada"
+	lRet := oWsdl:SetOperation(cMetodo)
 	If lRet == .F.
 		ConOut("Erro SetOperation: " + oWsdl:cError)
 		return nProc
 	EndIf
 
+	cRet := U_SendSOAP(cUrl, cMetodo, _cSoap, @cRet)
+	lRet := Empty(cRet)
 
-	lRet:= oWsdl:SendSoapMsg()
+	// lRet:= oWsdl:SendSoapMsg()
 	if lRet== .F.
 		conOut("   enviando mensagem para o servidor... erro: " + oWsdl:cError )
 		Return nProc
 	endif
 
-	cXMLRet := oWsdl:GetSoapResponse()
+	// cXMLRet := oWsdl:GetSoapResponse()
 
-	oRet := XmlParser(cXMLRet,"_",@cErro,@cAviso)     // Abre arquivo e retorna objeto com os dados do XML
+	oRet := XmlParser(cRet,"_",@cErro,@cAviso)     // Abre arquivo e retorna objeto com os dados do XML
 
 	If !Empty(cAviso)
 		Conout("Nùo foi possùvel ler o retorno ->"+cAviso,"Atenùùo - "+ProcName())
@@ -5740,6 +5951,10 @@ Static function  EnvProcEmpresa(cXml,cXmlErro)
 	Local oRetXml
 	Local cErro as char
 	Local cXmlRet as char
+	Local cRet     := ""
+	Local cUrl     := ""
+	Local cMetodo  := ""
+
 	//Local lProc  as char
 	Default cXmlErro := ''
 
@@ -5747,6 +5962,7 @@ Static function  EnvProcEmpresa(cXml,cXmlErro)
 	oWsdl := TWsdlManager():New()
 	oWsdl:lSSLInsecure := .T.
 	oWsdl:nTimeout       := 120
+	oWsdl:AddHttpHeader("Authorization", "Bearer " + U_NewToken())
 	/*
 			nSSLVersion  - Lista de opùùes que pode ser setadas:
 			0 - O programa tenta descobrir a versùo do protocolo
@@ -5756,13 +5972,15 @@ Static function  EnvProcEmpresa(cXml,cXmlErro)
 	*/
 	oWsdl:nSSLVersion := 0
 
-	lSucesso := oWsdl:ParseURL(Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" )
+	cUrl := Lower(AllTrim(GetMv("MV_XPARURL")))+"/services/Empresa.svc?wsdl" 
+	lSucesso := oWsdl:ParseURL(cUrl)
 	If lSucesso == .F.
 		ConOut("Erro ParseURL: " + oWsdl:cError)
 		Return .F.
 	EndIf
 
-	lSucesso := oWsdl:SetOperation("ProcessarEmpresa")
+	cMetodo := "ProcessarEmpresa"
+	lSucesso := oWsdl:SetOperation(cMetodo)
 	If lSucesso == .F.
 		ConOut("Erro SetOperation: " + oWsdl:cError)
 		return .F.
@@ -6661,3 +6879,12 @@ Static Function nFindCarc(aArray, cPalav)
 	nRet := aScan( aArray, { |x| AllTrim( x ) ==  UPPER(AllTrim(cPalav)) } )
 Return nRet
 //COR004
+
+User Function SENDSOAP(cUrl, cMetodo, cBody, cRet)
+
+Local nTimeOut := 120
+Local aHeader  := { 	"Content-Type: text/xml; charset=utf-8",;
+						"Authorization: Bearer " + U_NewToken(),;
+						"SoapAction: " + cMetodo  }
+
+Return XMLFORMAT(Httppost(cUrl,"",cBody,nTimeOut,aHeader,@cRet))
